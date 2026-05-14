@@ -1,0 +1,10 @@
+.pytest_cache/
+.venv/
+./transformer/
+.DS_Store
+.claude
+notes/
+temp/
+
+notes
+*.egg-info/

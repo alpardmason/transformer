@@ -1,0 +1,22 @@
+[project]
+name = "transformer"
+version = "0.1.0"
+description = "Original Transformer from Attention is All You Need — educational implementation"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "tqdm",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.0.3"]
+mlx = ["mlx>=0.20"]
+jax = ["jax>=0.5", "flax>=0.10", "optax>=0.2"]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
