@@ -320,6 +320,156 @@ class SyntheticData:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Arithmetic Data — Model Learns Arithmetic from Digit Sequences
+# ──────────────────────────────────────────────────────────────────────
+
+
+class ArithmeticData:
+    """Generate arithmetic expression batches for seq2seq learning.
+
+    The model takes an expression like "1+1" and must decode "=2".
+    Numbers are digit-by-digit so the model learns decimal place value.
+    Special tokens: 0=PAD, 1=BOS, 2=EOS.
+
+    Token layout (22 tokens total):
+      0 = PAD, 1 = BOS, 2 = EOS
+      3-12 = digits 0-9
+      13 = '+', 14 = '-', 15 = '*', 16 = '/', 17 = '='
+      18-21 = reserved
+
+    MLX difference: Uses mx.random.randint instead of torch.randint; returns
+    mx.array instead of torch.Tensor. Building variable-length token lists
+    then padding is done via Python lists (same approach as PyTorch).
+    """
+
+    NUM_OFFSET = 3
+    PLUS = 13
+    MINUS = 14
+    MUL = 15
+    DIV = 16
+    EQ = 17
+    OPS = (PLUS, MINUS, MUL, DIV)
+    VOCAB_SIZE = 22
+
+    def __init__(
+        self,
+        max_len: int = 10,
+        max_operand: int = 99,
+        pad_idx: int = 0,
+        bos_idx: int = 1,
+        eos_idx: int = 2,
+    ):
+        self.max_len = max_len
+        self.max_operand = max_operand
+        self.pad_idx = pad_idx
+        self.bos_idx = bos_idx
+        self.eos_idx = eos_idx
+
+    @staticmethod
+    def _to_digits(n: int) -> list[int]:
+        """Convert integer to list of digit tokens (most-significant first)."""
+        if n == 0:
+            return [ArithmeticData.NUM_OFFSET]
+        digits = []
+        while n > 0:
+            digits.append(n % 10 + ArithmeticData.NUM_OFFSET)
+            n //= 10
+        return list(reversed(digits))
+
+    def generate_batch(self, batch_size: int) -> tuple[mx.array, mx.array, mx.array]:
+        B = batch_size
+        max_op = self.max_operand
+
+        op_indices = mx.random.randint(0, 4, (B,))
+        op_indices_eager = op_indices.tolist()  # MLX: force evaluation to Python list
+
+        a_vals = mx.random.randint(0, max_op + 1, (B,)).tolist()
+        b_vals = mx.random.randint(0, max_op + 1, (B,)).tolist()
+
+        for i in range(B):
+            op = op_indices_eager[i]
+            a = a_vals[i]
+            b = b_vals[i]
+            if op == 1:  # subtraction: a >= b
+                if a < b:
+                    a_vals[i], b_vals[i] = b, a
+            elif op == 3:  # division: exact only
+                b = max(b, 1)  # ensure b >= 1
+                max_k = max_op // b
+                import random
+                k = random.randint(0, max_k)
+                a_vals[i] = b * k
+                b_vals[i] = b
+
+        answers = []
+        for i in range(B):
+            a = a_vals[i]
+            b = b_vals[i]
+            op = op_indices_eager[i]
+            if op == 0:
+                answers.append(a + b)
+            elif op == 1:
+                answers.append(a - b)
+            elif op == 2:
+                answers.append(a * b)
+            else:
+                answers.append(a // b if b != 0 else 0)
+
+        # Build token sequences as lists then pad
+        src_list = []
+        tgt_out_list = []
+        for i in range(B):
+            a_digits = self._to_digits(a_vals[i])
+            b_digits = self._to_digits(b_vals[i])
+            ans_digits = self._to_digits(answers[i])
+
+            src_tokens = a_digits + [self.OPS[op_indices_eager[i]]] + b_digits + [self.eos_idx]
+            tgt_tokens = [self.EQ] + ans_digits + [self.eos_idx]
+
+            src_list.append(src_tokens)
+            tgt_out_list.append(tgt_tokens)
+
+        src_max = max(len(s) for s in src_list)
+        tgt_max = max(len(t) for t in tgt_out_list)
+
+        src = mx.full((B, src_max), self.pad_idx, dtype=mx.int32)
+        tgt_out = mx.full((B, tgt_max), self.pad_idx, dtype=mx.int32)
+
+        for i in range(B):
+            src[i, :len(src_list[i])] = mx.array(src_list[i], dtype=mx.int32)
+            tgt_out[i, :len(tgt_out_list[i])] = mx.array(tgt_out_list[i], dtype=mx.int32)
+
+        # tgt_in: BOS + tgt_out[:, :-1]
+        tgt_in = mx.full((B, tgt_max), self.pad_idx, dtype=mx.int32)
+        tgt_in[:, 0] = self.bos_idx
+        tgt_in[:, 1:tgt_max] = tgt_out[:, :tgt_max - 1]
+
+        return src, tgt_in, tgt_out
+
+    @staticmethod
+    def decode(tokens: list[int]) -> str:
+        chars = []
+        for t in tokens:
+            if t in (0, 1, 2):
+                continue
+            if 3 <= t <= 12:
+                chars.append(str(t - 3))
+            elif t == 13:
+                chars.append('+')
+            elif t == 14:
+                chars.append('-')
+            elif t == 15:
+                chars.append('*')
+            elif t == 16:
+                chars.append('/')
+            elif t == 17:
+                chars.append('=')
+            else:
+                chars.append('?')
+        return ''.join(chars) if chars else '<empty>'
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Training Loop
 # ──────────────────────────────────────────────────────────────────────
 

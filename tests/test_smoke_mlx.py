@@ -33,7 +33,7 @@ from transformer_mlx.layers import (
     Encoder,
     Decoder,
 )
-from transformer_mlx.train import SyntheticData, make_std_mask, run_epoch_steps
+from transformer_mlx.train import ArithmeticData, SyntheticData, make_std_mask, run_epoch_steps
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -379,6 +379,104 @@ def test_no_weight_tying():
     model = Transformer(src_vocab=50, tgt_vocab=50, N=2, d_model=64, d_ff=256, h=2, tie_weights=False)
     assert model.encoder.embedding.weight is not model.decoder.embedding.weight
     assert model.generator.weight is not model.decoder.embedding.weight
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Arithmetic Data Tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_arithmetic_data_shapes():
+    """Verify: src, tgt_in, tgt_out have compatible shapes."""
+    mx.random.seed(42)
+    data = ArithmeticData(max_len=10, max_operand=12)
+    src, tgt_in, tgt_out = data.generate_batch(16)
+    B = 16
+    assert src.ndim == 2 and src.shape[0] == B
+    assert tgt_in.ndim == 2 and tgt_in.shape[0] == B
+    assert tgt_out.ndim == 2 and tgt_out.shape[0] == B
+    assert tgt_in.shape[1] == tgt_out.shape[1]
+    # First token of tgt_in is BOS (1)
+    assert mx.all(tgt_in[:, 0] == 1).item()
+    # src ends with EOS (2)
+    for b in range(B):
+        assert int((src[b] == 2).sum().item()) >= 1, "src must contain EOS"
+
+
+def test_arithmetic_data_token_range():
+    """Verify: all tokens are in valid range [0, 21]."""
+    mx.random.seed(42)
+    data = ArithmeticData(max_len=10, max_operand=12)
+    src, tgt_in, tgt_out = data.generate_batch(32)
+    assert int(src.min().item()) >= 0 and int(src.max().item()) <= 21
+    assert int(tgt_in.min().item()) >= 0 and int(tgt_in.max().item()) <= 21
+    assert int(tgt_out.min().item()) >= 0 and int(tgt_out.max().item()) <= 21
+
+
+def test_arithmetic_subtraction_non_negative():
+    """Verify: subtraction results don't contain '-' token in target."""
+    mx.random.seed(42)
+    data = ArithmeticData(max_len=10, max_operand=12)
+    for _ in range(10):
+        src, _, tgt_out = data.generate_batch(8)
+        for i in range(8):
+            tgt_tokens = tgt_out[i].tolist()
+            assert 14 not in tgt_tokens, "Subtraction result should not contain '-' token"
+
+
+def test_arithmetic_transformer_loss_decreases():
+    """Verify the model can overfit a tiny arithmetic dataset (max_operand=9)."""
+    mx.random.seed(42)
+    model = Transformer(
+        src_vocab=ArithmeticData.VOCAB_SIZE,
+        tgt_vocab=ArithmeticData.VOCAB_SIZE,
+        N=2,
+        d_model=64,
+        d_ff=256,
+        h=2,
+        dropout=0.0,
+    )
+    model.train()
+
+    criterion = LabelSmoothing(smoothing=0.0, ignore_index=0)
+    adam = optim.Adam(learning_rate=1.0, betas=(0.9, 0.98), eps=1e-9)
+    noam = NoamOpt(model_size=64, factor=1.0, warmup=100, optimizer=adam)
+
+    data = ArithmeticData(max_len=10, max_operand=9)
+
+    losses = []
+    model.train()
+    for step in range(1, 101):
+        src, tgt_in, tgt_out = data.generate_batch(16)
+
+        def loss_fn(m, s, ti, to):
+            src_mask = (s != 0)[:, None, None, :]
+            tgt_mask = make_std_mask(ti, 0)
+            logits = m(s, ti, src_mask, tgt_mask)
+            return criterion(logits, to)
+
+        loss_and_grad = mx.value_and_grad(loss_fn)
+        loss, grads = loss_and_grad(model, src, tgt_in, tgt_out)
+        noam.step(model, grads)
+        mx.eval(model.parameters(), noam.optimizer.state)
+
+        losses.append(float(loss.item()))
+
+    first_avg = sum(losses[:10]) / 10
+    last_avg = sum(losses[-10:]) / 10
+    assert last_avg < first_avg, (
+        f"Loss did not decrease: first 10 avg={first_avg:.4f}, last 10 avg={last_avg:.4f}"
+    )
+
+
+def test_arithmetic_decode():
+    """Verify: decode produces human-readable arithmetic strings."""
+    tokens = [ArithmeticData.NUM_OFFSET + 1, ArithmeticData.NUM_OFFSET + 2,
+              ArithmeticData.PLUS, ArithmeticData.NUM_OFFSET + 7, 2]
+    assert ArithmeticData.decode(tokens) == "12+7"
+    tokens2 = [ArithmeticData.EQ, ArithmeticData.NUM_OFFSET + 1,
+               ArithmeticData.NUM_OFFSET + 9, 2]
+    assert ArithmeticData.decode(tokens2) == "=19"
 
 
 if __name__ == "__main__":

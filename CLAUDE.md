@@ -4,6 +4,12 @@ An educational implementation of the encoder-decoder Transformer from
 Vaswani et al. (2017). Strictly follows the original paper — no modern
 techniques.
 
+**Python requirement**: >=3.12 (set in pyproject.toml). The package is
+installed from `src/` via setuptools (`[tool.setuptools.packages.find]
+where = ["src"]`), so `from transformer import ...` resolves to
+`src/transformer/`. This is an editable install — `uv sync` installs the
+package automatically.
+
 ## Project layout
 
 ```
@@ -38,22 +44,61 @@ transformer/
 ## How to work with this project
 
 ```bash
-uv sync                                    # create venv, install PyTorch deps
-uv run pytest -v                           # run PyTorch tests
+# First-time setup: create venv, install PyTorch deps + pytest for tests
+uv sync --group dev
+
+# Run PyTorch tests (24 tests: 18 copy-task + 6 arithmetic)
+uv run pytest tests/test_smoke.py -v
+
+# Arithmetic task (default) — max_operand=12 for quick experiments, 99 for full
 uv run python scripts/train.py --steps 2000 --d-model 128 --N 2
+uv run python scripts/train.py --task arithmetic --steps 2000 --max-operand 12
+
+# Copy task (for comparison / testing architecture)
+uv run python scripts/train.py --task copy --steps 2000 --d-model 128 --N 2
 
 # MLX (Apple Silicon only)
-uv sync --group mlx                        # add mlx deps
+uv sync --group mlx --group dev
 uv run --group mlx --group dev pytest tests/test_smoke_mlx.py -v
-uv run --group mlx python scripts/train_mlx.py --steps 1000
+uv run --group mlx python scripts/train_mlx.py --steps 1000 --max-operand 12
 
 # JAX
-uv sync --group jax                        # add jax+flax+optax deps
+uv sync --group jax --group dev
 uv run --group jax --group dev pytest tests/test_smoke_jax.py -v
-uv run --group jax python scripts/train_jax.py --steps 1000
+uv run --group jax python scripts/train_jax.py --steps 1000 --max-operand 12
 ```
 
 Dependency groups are additive — `--group mlx --group dev` includes both.
+**pytest is in the `dev` group** — always include `--group dev` when running tests.
+
+## Training tasks
+
+The project supports two tasks via `--task` flag in training scripts:
+
+### Arithmetic (default)
+
+Model takes an expression like `1+1` and generates `=2`. Numbers are digit-by-digit
+so the model learns decimal place value. Operations: +, -, *, / with operands in
+[0, max_operand] (default 99).
+
+- Subtraction ensures a >= b (non-negative results)
+- Division uses exact division only (a = b × k)
+- `--max-operand` controls difficulty: 9 = single-digit, 12 = easy 2-digit, 99 = full
+
+Token layout (22 tokens, `ArithmeticData.VOCAB_SIZE`):
+| ID | Meaning | ID | Meaning |
+|----|---------|----|---------|
+| 0 | PAD | 1 | BOS |
+| 2 | EOS | 3-12 | digits 0-9 |
+| 13 | `+` | 14 | `-` |
+| 15 | `*` | 16 | `/` |
+| 17 | `=` | 18-21 | reserved |
+
+### Copy
+
+Model must reproduce the input sequence (identity mapping). Uses `SyntheticData`
+with random content tokens (IDs 3..vocab_size-1). Useful for verifying the
+architecture works before tackling the harder arithmetic task.
 
 ## Architecture (strict original paper)
 

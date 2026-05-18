@@ -3,11 +3,7 @@ name = "transformer"
 version = "0.1.0"
 description = "Original Transformer from Attention is All You Need — educational implementation"
 requires-python = ">=3.12"
-dependencies = [
-    "torch>=2.0",
-    "numpy",
-    "tqdm",
-]
+dependencies = ["torch>=2.0", "numpy", "tqdm"]
 
 [dependency-groups]
 dev = ["pytest>=9.0.3"]

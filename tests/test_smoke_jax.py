@@ -39,7 +39,7 @@ from transformer_jax.layers import (
     Encoder,
     Decoder,
 )
-from transformer_jax.train import SyntheticData, make_std_mask, label_smoothing_loss
+from transformer_jax.train import ArithmeticData, SyntheticData, make_std_mask, label_smoothing_loss
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -473,6 +473,126 @@ def test_no_weight_tying():
     enc_embed = params["encoder_embed"]["Embed_0"]["embedding"]
     dec_embed = params["decoder_embed"]["Embed_0"]["embedding"]
     assert enc_embed is not dec_embed, "Encoder/decoder embeddings should not be tied"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Arithmetic Data Tests
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_arithmetic_data_shapes():
+    """Verify: src, tgt_in, tgt_out have compatible shapes."""
+    rng_key = jax.random.PRNGKey(42)
+    data = ArithmeticData(max_len=10, max_operand=12)
+    src, tgt_in, tgt_out, rng_key = data.generate_batch(16, rng_key)
+    B = 16
+    assert src.ndim == 2 and src.shape[0] == B
+    assert tgt_in.ndim == 2 and tgt_in.shape[0] == B
+    assert tgt_out.ndim == 2 and tgt_out.shape[0] == B
+    assert tgt_in.shape[1] == tgt_out.shape[1]
+    # First token of tgt_in is BOS (1)
+    assert jnp.all(tgt_in[:, 0] == 1).item()
+    # src ends with EOS (2) at varying positions
+    for b in range(B):
+        assert int((src[b] == 2).sum()) >= 1, "src must contain EOS"
+
+
+def test_arithmetic_data_token_range():
+    """Verify: all tokens are in valid range [0, 21]."""
+    rng_key = jax.random.PRNGKey(42)
+    data = ArithmeticData(max_len=10, max_operand=12)
+    src, tgt_in, tgt_out, rng_key = data.generate_batch(32, rng_key)
+    assert int(src.min()) >= 0 and int(src.max()) <= 21
+    assert int(tgt_in.min()) >= 0 and int(tgt_in.max()) <= 21
+    assert int(tgt_out.min()) >= 0 and int(tgt_out.max()) <= 21
+
+
+def test_arithmetic_subtraction_non_negative():
+    """Verify: subtraction results don't contain '-' token in target."""
+    rng_key = jax.random.PRNGKey(42)
+    data = ArithmeticData(max_len=10, max_operand=12)
+    for _ in range(10):
+        src, _, tgt_out, rng_key = data.generate_batch(8, rng_key)
+        for i in range(8):
+            tgt_tokens = tgt_out[i].tolist()
+            assert 14 not in tgt_tokens, "Subtraction result should not contain '-' token"
+
+
+def test_arithmetic_transformer_loss_decreases():
+    """Verify the model can overfit a tiny arithmetic dataset (max_operand=9)."""
+    model = Transformer(
+        src_vocab=ArithmeticData.VOCAB_SIZE,
+        tgt_vocab=ArithmeticData.VOCAB_SIZE,
+        N=2,
+        d_model=64,
+        d_ff=256,
+        h=2,
+        dropout=0.0,
+    )
+
+    rng_key = jax.random.PRNGKey(0)
+    rng_key, init_rng, drop_rng = jax.random.split(rng_key, 3)
+    dummy_src = jnp.ones((1, 5), dtype=jnp.int32)
+    dummy_tgt = jnp.ones((1, 5), dtype=jnp.int32)
+    variables = model.init(
+        {"params": init_rng, "dropout": drop_rng},
+        dummy_src, dummy_tgt,
+    )
+    variables = tie_weights(variables)
+
+    # Noam schedule for d_model=64, warmup=100
+    def schedule_fn(step):
+        step = step.astype(jnp.float32)
+        arg1 = step ** (-0.5)
+        arg2 = step * (100 ** (-1.5))
+        return (64 ** (-0.5)) * jnp.minimum(arg1, arg2)
+
+    tx = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(learning_rate=schedule_fn, b1=0.9, b2=0.98, eps=1e-9),
+    )
+    state = train_state.TrainState.create(
+        apply_fn=model.apply,
+        params=variables["params"],
+        tx=tx,
+    )
+
+    data = ArithmeticData(max_len=10, max_operand=9)
+    losses = []
+
+    for step in range(1, 101):
+        src, tgt_in, tgt_out, rng_key = data.generate_batch(16, rng_key)
+        rng_key, drop_key = jax.random.split(rng_key)
+
+        def loss_fn(params):
+            src_mask = (src != 0)[:, None, None, :]
+            tgt_mask = make_std_mask(tgt_in, 0)
+            logits = state.apply_fn(
+                {"params": params},
+                src, tgt_in, src_mask, tgt_mask,
+                rngs={"dropout": drop_key},
+            )
+            return label_smoothing_loss(logits, tgt_out, smoothing=0.0, ignore_index=0)
+
+        loss, grads = jax.value_and_grad(loss_fn)(state.params)
+        state = state.apply_gradients(grads=grads)
+        losses.append(float(loss))
+
+    first_avg = sum(losses[:10]) / 10
+    last_avg = sum(losses[-10:]) / 10
+    assert last_avg < first_avg, (
+        f"Loss did not decrease: first 10 avg={first_avg:.4f}, last 10 avg={last_avg:.4f}"
+    )
+
+
+def test_arithmetic_decode():
+    """Verify: decode produces human-readable arithmetic strings."""
+    tokens = [ArithmeticData.NUM_OFFSET + 1, ArithmeticData.NUM_OFFSET + 2,
+              ArithmeticData.PLUS, ArithmeticData.NUM_OFFSET + 7, 2]
+    assert ArithmeticData.decode(tokens) == "12+7"
+    tokens2 = [ArithmeticData.EQ, ArithmeticData.NUM_OFFSET + 1,
+               ArithmeticData.NUM_OFFSET + 9, 2]
+    assert ArithmeticData.decode(tokens2) == "=19"
 
 
 if __name__ == "__main__":
