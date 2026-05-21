@@ -165,20 +165,20 @@ class LabelSmoothing:
         ).squeeze(-1)  # (B, S)
 
         # -(ε/V) * sum_k log p(k) — uniform smoothing mass over all classes
-        neg_log_sum = -log_preds.sum(axis=-1)  # (B, S)
+        neg_log_sum = -log_preds.sum(axis=-1)  # shape:(B, S)
 
         uniform = self.smoothing / vocab_size  # ε/V
         loss = (
             1.0 - self.smoothing
-        ) * neg_log_correct + uniform * neg_log_sum  # (B, S)
+        ) * neg_log_correct + uniform * neg_log_sum  # shape:(B, S)
 
         # Mask out padding positions (contribute zero to total)
-        mask = target != self.ignore_index  # (B, S)
+        mask = target != self.ignore_index  # shape:(B, S)
         loss = mx.where(mask, loss, mx.zeros_like(loss))
 
         # Average over non-padding tokens (not positions: a long sequence
         # contributes more to the loss than a short one).
-        n_tokens = mx.maximum(mask.astype(mx.int32).sum(), 1)
+        n_tokens = mx.maximum(mask.astype(mx.int32).sum(), 1)  # shape: scalar
         return loss.sum() / n_tokens
 
 
