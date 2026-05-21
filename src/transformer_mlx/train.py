@@ -135,6 +135,11 @@ class LabelSmoothing:
         -sum_k q(k) * log p(k)
       i.e. cross-entropy with the smoothed distribution q as the target.
 
+      Memory-efficient closed form (avoids materializing q as a (B, S, V) tensor):
+        q = (1-ε)*one_hot(y) + ε/V  expands to:
+        loss = -(1-ε)*log p(y) - (ε/V)*sum_k log p(k)
+      We gather log p(y) with take_along_axis and sum log p(k) over V inline.
+
     MLX differences:
       - Plain callable, not nn.Module (no learnable parameters).
       - mx.where(cond, a, b) replaces masked_fill (functional; no in-place ops).
@@ -149,46 +154,34 @@ class LabelSmoothing:
     def __init__(self, smoothing: float = 0.1, ignore_index: int = 0):
         self.smoothing = smoothing
         self.ignore_index = ignore_index
-        self.confidence = 1.0 - smoothing
 
     def __call__(self, x: mx.array, target: mx.array) -> mx.array:
         """x: (B, S, V), target: (B, S)"""
         vocab_size = x.shape[-1]  # V
 
-        # Build smooth target distribution via broadcast comparison.
-        # MLX: no scatter_ / put_along_axis with float values. Instead, use
-        # mx.where with a boolean mask identifying the correct-class positions.
-        #   is_correct: (B, S, V) — True at the index matching target[b,s]
-        # Smooth toward uniform: q = (1-ε)*one_hot(y) + ε/V
-        #   correct class: (1-ε) + ε/V
-        #   wrong classes: ε/V
-        uniform = self.smoothing / vocab_size                     # ε/V
-        is_correct = mx.arange(vocab_size)[None, None, :] == target[..., None]  # (B, S, V)
-        true_dist = mx.where(
-            is_correct,
-            mx.full(x.shape, self.confidence + uniform),          # (1-ε) + ε/V
-            mx.full(x.shape, uniform),                            # ε/V
-        )
-
-        # Positions where target is padding get zero probability everywhere
-        mask = target == self.ignore_index  # (B, S)
-        # MLX: mx.where replaces masked_fill
-        true_dist = mx.where(mask[..., None], mx.zeros_like(true_dist), true_dist)
-
-        # Cross-entropy with soft targets: -sum_k q(k) * log p(k)
-        # Equivalent to KL(q || p) for optimization because q is fixed — the
-        # term sum_k q(k) log q(k) has zero gradient w.r.t. model parameters.
+        # log p(k) for every class — still (B, S, V), but we never build q.
         # MLX: no mx.log_softmax — compute log after softmax manually
-        log_preds = mx.log(mx.softmax(x, axis=-1))       # (B, S, V) — log p(k)
-        ce = -(true_dist * log_preds).sum(axis=-1)       # (B, S) — loss per position
+        log_preds = mx.log(mx.softmax(x, axis=-1))  # (B, S, V)
+
+        # -(1-ε) * log p(correct) — gather the target class log-prob only
+        nll = -mx.take_along_axis(
+            log_preds, target[..., None], axis=-1
+        ).squeeze(-1)  # (B, S)
+
+        # -(ε/V) * sum_k log p(k) — uniform smoothing mass over all classes
+        uniform_term = -log_preds.sum(axis=-1)  # (B, S)
+
+        eps_over_v = self.smoothing / vocab_size  # ε/V
+        loss = (1.0 - self.smoothing) * nll + eps_over_v * uniform_term  # (B, S)
 
         # Mask out padding positions (contribute zero to total)
-        ce = mx.where(mask, mx.zeros_like(ce), ce)
+        mask = target != self.ignore_index  # (B, S)
+        loss = mx.where(mask, loss, mx.zeros_like(loss))
 
         # Average over non-padding tokens (not positions: a long sequence
         # contributes more to the loss than a short one).
-        n_tokens = mx.maximum((~mask).astype(mx.int32).sum(), 1)
-        return ce.sum() / n_tokens
+        n_tokens = mx.maximum(mask.astype(mx.int32).sum(), 1)
+        return loss.sum() / n_tokens
 
 
 # ──────────────────────────────────────────────────────────────────────
