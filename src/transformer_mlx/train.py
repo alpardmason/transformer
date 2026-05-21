@@ -115,8 +115,13 @@ class LabelSmoothing:
     """Label smoothing with epsilon = 0.1 (paper §5.4).
 
     Instead of a hard one-hot target (all probability on the correct class),
-    we use a smoothed distribution:
-        q(k) = (1 - ε) * 1[k == y]  +  ε / (V - 1) * 1[k != y]
+    we spread a small mass ε uniformly over the entire vocabulary:
+        q(k) = (1 - ε) * 1[k == y]  +  ε / V
+
+    Every class gets a baseline ε/V; the correct class gets an extra (1 - ε):
+        correct class:  (1 - ε) + ε/V
+        wrong classes:    ε/V
+    Both forms sum to 1 over V classes.
 
     This prevents the model from becoming overconfident (putting probability 1
     on a single token), which improves generalization and BLEU scores.
@@ -154,12 +159,15 @@ class LabelSmoothing:
         # MLX: no scatter_ / put_along_axis with float values. Instead, use
         # mx.where with a boolean mask identifying the correct-class positions.
         #   is_correct: (B, S, V) — True at the index matching target[b,s]
-        #   q(k) = confidence if k == target else ε/(V-1)
+        # Smooth toward uniform: q = (1-ε)*one_hot(y) + ε/V
+        #   correct class: (1-ε) + ε/V
+        #   wrong classes: ε/V
+        uniform = self.smoothing / vocab_size                     # ε/V
         is_correct = mx.arange(vocab_size)[None, None, :] == target[..., None]  # (B, S, V)
         true_dist = mx.where(
             is_correct,
-            mx.full(x.shape, self.confidence),
-            mx.full(x.shape, self.smoothing / (vocab_size - 1)),
+            mx.full(x.shape, self.confidence + uniform),          # (1-ε) + ε/V
+            mx.full(x.shape, uniform),                            # ε/V
         )
 
         # Positions where target is padding get zero probability everywhere
