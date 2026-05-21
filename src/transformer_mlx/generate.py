@@ -65,6 +65,7 @@ def greedy_decode(
     memory = model.encode(src, src_mask)            # (B, S_src, d_model) — computed once
 
     ys = mx.full((batch_size, 1), bos_idx, dtype=mx.int32)  # (B, 1)
+    finished = mx.zeros((batch_size,), dtype=mx.bool_)  # (B,)
 
     for _ in range(max_len - 1):
         tgt_mask = make_std_mask(ys, pad_idx)              # (B, 1, cur_len, cur_len)
@@ -73,12 +74,18 @@ def greedy_decode(
         # Only the LAST position's logits matter — that's the next token
         # MLX: mx.argmax(axis=...) instead of .argmax(dim=...)
         next_token = mx.argmax(logits[:, -1, :], axis=-1, keepdims=True)  # (B, 1)
+        # Finished sequences keep extending with PAD — no tokens after first EOS
+        next_token = mx.where(
+            finished[:, None],
+            mx.full(next_token.shape, pad_idx, dtype=next_token.dtype),
+            next_token,
+        )
 
         # MLX: mx.concatenate replaces torch.cat
         ys = mx.concatenate([ys, next_token], axis=1)      # (B, cur_len+1)
+        finished = finished | (next_token.squeeze(1) == eos_idx)
 
-        # Stop early if ALL batch items have produced EOS
-        if (next_token == eos_idx).all().item():
+        if finished.all().item():
             break
 
     return ys

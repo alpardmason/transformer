@@ -79,6 +79,7 @@ def greedy_decode(
     )  # (B, S_src, d_model)
 
     ys = jnp.full((batch_size, 1), bos_idx, dtype=jnp.int32)  # (B, 1)
+    finished = jnp.zeros((batch_size,), dtype=jnp.bool_)  # (B,)
 
     for _ in range(max_len - 1):
         rng_key, dec_key = jax.random.split(rng_key)
@@ -96,11 +97,17 @@ def greedy_decode(
         logits = out @ variables["params"]["generator"]["kernel"]
         # Only the LAST position's logits matter — that's the next token
         next_token = jnp.argmax(logits[:, -1, :], axis=-1, keepdims=True)  # (B, 1)
+        # Finished sequences keep extending with PAD — no tokens after first EOS
+        next_token = jnp.where(
+            finished[:, None],
+            jnp.full_like(next_token, pad_idx),
+            next_token,
+        )
 
         ys = jnp.concatenate([ys, next_token], axis=1)  # (B, cur_len+1)
+        finished = finished | (next_token.squeeze(1) == eos_idx)
 
-        # Stop early if ALL batch items have produced EOS
-        if (next_token == eos_idx).all():
+        if bool(finished.all()):
             break
 
     return ys
