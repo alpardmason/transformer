@@ -6,20 +6,20 @@ Implements the exact training setup from the paper:
 - Synthetic data for educational use
 
 MLX vs PyTorch — key differences annotated throughout:
-  - Gradient computation: mx.value_and_grad(model, loss_fn) instead of
+  - Gradient computation: mlx.value_and_grad(model, loss_fn) instead of
     loss.backward(). No zero_grad() needed — gradients are computed fresh.
-  - Lazy evaluation: must call mx.eval() periodically to avoid graph growth.
-  - mx.where(cond, a, b) replaces masked_fill / scatter_.
-  - mx.put_along_axis replaces scatter_ for indexed assignment.
-  - mx.random.randint / mx.random.normal for random tensors.
+  - Lazy evaluation: must call mlx.eval() periodically to avoid graph growth.
+  - mlx.where(cond, a, b) replaces masked_fill / scatter_.
+  - mlx.put_along_axis replaces scatter_ for indexed assignment.
+  - mlx.random.randint / mlx.random.normal for random tensors.
   - No torch.no_grad() context needed — model.eval() sets dropout to identity.
-  - mx.argmax(axis=...) replaces .argmax(dim=...).
+  - mlx.argmax(axis=...) replaces .argmax(dim=...).
 """
 
 import time
 from collections.abc import Callable, Iterator
 
-import mlx.core as mx
+import mlx.core as mlx
 import mlx.nn as nn
 import mlx.optimizers as optim
 from tqdm import tqdm
@@ -138,8 +138,8 @@ class LabelSmoothing:
 
     MLX differences:
       - Plain callable, not nn.Module (no learnable parameters).
-      - mx.where(cond, a, b) replaces masked_fill (functional; no in-place ops).
-      - No mx.log_softmax — compute mx.log(mx.softmax(...)) manually.
+      - mlx.where(cond, a, b) replaces masked_fill (functional; no in-place ops).
+      - No mlx.log_softmax — compute mlx.log(mlx.softmax(...)) manually.
 
     Shapes:
       x:      (B, S, V)  — raw logits from the model
@@ -151,16 +151,16 @@ class LabelSmoothing:
         self.smoothing = smoothing
         self.ignore_index = ignore_index
 
-    def __call__(self, x: mx.array, target: mx.array) -> mx.array:
+    def __call__(self, x: mlx.array, target: mlx.array) -> mlx.array:
         """x: (B, S, V), target: (B, S)"""
         vocab_size = x.shape[-1]  # V
 
         # log p(k) for every class — still (B, S, V), but we never build q.
-        # MLX: no mx.log_softmax — compute log after softmax manually
-        log_preds = mx.log(mx.softmax(x, axis=-1))  # (B, S, V)
+        # MLX: no mlx.log_softmax — compute log after softmax manually
+        log_preds = mlx.log(mlx.softmax(x, axis=-1))  # (B, S, V)
 
         # -(1-ε) * log p(correct) — gather the target class log-prob only
-        neg_log_correct = -mx.take_along_axis(
+        neg_log_correct = -mlx.take_along_axis(
             log_preds, target[..., None], axis=-1
         ).squeeze(-1)  # (B, S)
 
@@ -174,11 +174,11 @@ class LabelSmoothing:
 
         # Mask out padding positions (contribute zero to total)
         mask = target != self.ignore_index  # shape:(B, S)
-        loss = mx.where(mask, loss, mx.zeros_like(loss))
+        loss = mlx.where(mask, loss, mlx.zeros_like(loss))
 
         # Average over non-padding tokens (not positions: a long sequence
         # contributes more to the loss than a short one).
-        n_tokens = mx.maximum(mask.astype(mx.int32).sum(), 1)  # shape: scalar
+        n_tokens = mlx.maximum(mask.astype(mlx.int32).sum(), 1)  # shape: scalar
         return loss.sum() / n_tokens
 
 
@@ -187,7 +187,7 @@ class LabelSmoothing:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def subsequent_mask(size: int) -> mx.array:
+def subsequent_mask(size: int) -> mlx.array:
     """Create a lower-triangular boolean mask that prevents attending to future tokens.
 
     Returns (1, size, size) where mask[:, i, j] = True iff j <= i.
@@ -198,15 +198,15 @@ def subsequent_mask(size: int) -> mx.array:
          [T, T, T, F],
          [T, T, T, T]]
 
-    MLX: mx.triu(x, k=1) replaces torch.triu(x, diagonal=1).
-    No dtype gymnastics needed — mx.ones returns float32, triu with int works fine.
+    MLX: mlx.triu(x, k=1) replaces torch.triu(x, diagonal=1).
+    No dtype gymnastics needed — mlx.ones returns float32, triu with int works fine.
     """
     attn_shape = (1, size, size)
-    mask = mx.triu(mx.ones(attn_shape), k=1)
+    mask = mlx.triu(mlx.ones(attn_shape), k=1)
     return mask == 0  # Lower triangular positions = True (can attend)
 
 
-def make_std_mask(tgt: mx.array, pad: int = 0) -> mx.array:
+def make_std_mask(tgt: mlx.array, pad: int = 0) -> mlx.array:
     """Create a combined padding + subsequent mask for decoder self-attention.
 
     Combines two masks via logical AND:
@@ -238,7 +238,7 @@ class SyntheticData:
     Vocabulary tokens start from index 3.
 
     MLX difference:
-      Returns mx.array instead of torch.Tensor. Uses mx.random.randint for
+      Returns mlx.array instead of torch.Tensor. Uses mlx.random.randint for
       random integer generation. Otherwise identical logic to the PyTorch version.
     """
 
@@ -256,7 +256,7 @@ class SyntheticData:
         self.bos_idx = bos_idx
         self.eos_idx = eos_idx
 
-    def generate_batch(self, batch_size: int) -> tuple[mx.array, mx.array, mx.array]:
+    def generate_batch(self, batch_size: int) -> tuple[mlx.array, mlx.array, mlx.array]:
         """Generate a batch of (src, tgt_in, tgt_out) for the copy task.
 
         Example with vocab_size=40, max_len=5, tokens=[8,12,3,4] (length 4):
@@ -274,51 +274,51 @@ class SyntheticData:
           tgt_out:  (B, max_len+1)
         """
         # Random lengths ensure variable-length sequences within the batch
-        # MLX: mx.random.randint(low, high, shape)
-        lengths = mx.random.randint(1, self.max_len + 1, (batch_size,))
+        # MLX: mlx.random.randint(low, high, shape)
+        lengths = mlx.random.randint(1, self.max_len + 1, (batch_size,))
         max_len = int(lengths.max().item())  # .item() triggers eval (lazy → eager)
         # Note: .item() forces evaluation of the lazy computation graph for length.max().
         # For the small synthetic data this is negligible; in production you'd batch
         # by a fixed max_len or pad to a known upper bound.
 
-        tokens = mx.random.randint(
+        tokens = mlx.random.randint(
             low=3, high=self.vocab_size, shape=(batch_size, max_len)
         )  # (B, max_len) — only content tokens (3..vocab_size-1)
 
         # Position mask: mask[b, p] = True iff position p < length of sequence b
-        mask = mx.arange(max_len)[None, :] < lengths[:, None]  # (B, max_len)
+        mask = mlx.arange(max_len)[None, :] < lengths[:, None]  # (B, max_len)
 
-        # MLX: .at[...].set() doesn't exist in MLX. Instead, use mx.where with
-        # position masks to build arrays, and mx.put_along_axis for single-position
+        # MLX: .at[...].set() doesn't exist in MLX. Instead, use mlx.where with
+        # position masks to build arrays, and mlx.put_along_axis for single-position
         # assignments (like placing EOS at each sequence's length position).
         # Compare: PyTorch's src[:, :max_len] = ... is in-place; MLX builds a new array.
 
         # Build content for positions 0..max_len-1 (non-EOS positions)
-        pad_value = mx.full(tokens.shape, self.pad_idx, dtype=mx.int32)
-        content = mx.where(mask, tokens, pad_value)  # (B, max_len)
+        pad_value = mlx.full(tokens.shape, self.pad_idx, dtype=mlx.int32)
+        content = mlx.where(mask, tokens, pad_value)  # (B, max_len)
 
         # ── Source: content + EOS ──────────────────────────────────────
         # Start with content tokens; add an extra column for potential EOS
-        extra_col = mx.full((batch_size, 1), self.pad_idx, dtype=mx.int32)
-        src = mx.concatenate([content, extra_col], axis=1)  # (B, max_len+1)
-        # Place EOS at the correct position per batch row using mx.put_along_axis
-        eos_vals = mx.full((batch_size, 1), self.eos_idx, dtype=mx.int32)
-        src = mx.put_along_axis(src, lengths[:, None], eos_vals, axis=1)
+        extra_col = mlx.full((batch_size, 1), self.pad_idx, dtype=mlx.int32)
+        src = mlx.concatenate([content, extra_col], axis=1)  # (B, max_len+1)
+        # Place EOS at the correct position per batch row using mlx.put_along_axis
+        eos_vals = mlx.full((batch_size, 1), self.eos_idx, dtype=mlx.int32)
+        src = mlx.put_along_axis(src, lengths[:, None], eos_vals, axis=1)
 
         # ── Target input: BOS + content (no EOS) ───────────────────────
-        tgt_input = mx.concatenate(
-            [mx.full((batch_size, 1), self.pad_idx, dtype=mx.int32), content], axis=1
+        tgt_input = mlx.concatenate(
+            [mlx.full((batch_size, 1), self.pad_idx, dtype=mlx.int32), content], axis=1
         )
-        tgt_input = mx.put_along_axis(
+        tgt_input = mlx.put_along_axis(
             tgt_input,
-            mx.zeros((batch_size, 1), dtype=mx.int32),
-            mx.full((batch_size, 1), self.bos_idx, dtype=mx.int32),
+            mlx.zeros((batch_size, 1), dtype=mlx.int32),
+            mlx.full((batch_size, 1), self.bos_idx, dtype=mlx.int32),
             axis=1,
         )
 
         # ── Target output: content + EOS (same as source) ──────────────
-        tgt_out = mx.concatenate([content, extra_col], axis=1)  # (B, max_len+1)
-        tgt_out = mx.put_along_axis(tgt_out, lengths[:, None], eos_vals, axis=1)
+        tgt_out = mlx.concatenate([content, extra_col], axis=1)  # (B, max_len+1)
+        tgt_out = mlx.put_along_axis(tgt_out, lengths[:, None], eos_vals, axis=1)
 
         return src, tgt_input, tgt_out
 
@@ -341,8 +341,8 @@ class ArithmeticData:
       13 = '+', 14 = '-', 15 = '*', 16 = '/', 17 = '='
       18-21 = reserved
 
-    MLX difference: Uses mx.random.randint instead of torch.randint; returns
-    mx.array instead of torch.Tensor. Building variable-length token lists
+    MLX difference: Uses mlx.random.randint instead of torch.randint; returns
+    mlx.array instead of torch.Tensor. Building variable-length token lists
     then padding is done via Python lists (same approach as PyTorch).
     """
 
@@ -380,15 +380,15 @@ class ArithmeticData:
             n //= 10
         return list(reversed(digits))
 
-    def generate_batch(self, batch_size: int) -> tuple[mx.array, mx.array, mx.array]:
+    def generate_batch(self, batch_size: int) -> tuple[mlx.array, mlx.array, mlx.array]:
         B = batch_size
         max_op = self.max_operand
 
-        op_indices = mx.random.randint(0, 4, (B,))
+        op_indices = mlx.random.randint(0, 4, (B,))
         op_indices_eager = op_indices.tolist()  # MLX: force evaluation to Python list
 
-        a_vals = mx.random.randint(0, max_op + 1, (B,)).tolist()
-        b_vals = mx.random.randint(0, max_op + 1, (B,)).tolist()
+        a_vals = mlx.random.randint(0, max_op + 1, (B,)).tolist()
+        b_vals = mlx.random.randint(0, max_op + 1, (B,)).tolist()
 
         for i in range(B):
             op = op_indices_eager[i]
@@ -439,17 +439,17 @@ class ArithmeticData:
         src_max = max(len(s) for s in src_list)
         tgt_max = max(len(t) for t in tgt_out_list)
 
-        src = mx.full((B, src_max), self.pad_idx, dtype=mx.int32)
-        tgt_out = mx.full((B, tgt_max), self.pad_idx, dtype=mx.int32)
+        src = mlx.full((B, src_max), self.pad_idx, dtype=mlx.int32)
+        tgt_out = mlx.full((B, tgt_max), self.pad_idx, dtype=mlx.int32)
 
         for i in range(B):
-            src[i, : len(src_list[i])] = mx.array(src_list[i], dtype=mx.int32)
-            tgt_out[i, : len(tgt_out_list[i])] = mx.array(
-                tgt_out_list[i], dtype=mx.int32
+            src[i, : len(src_list[i])] = mlx.array(src_list[i], dtype=mlx.int32)
+            tgt_out[i, : len(tgt_out_list[i])] = mlx.array(
+                tgt_out_list[i], dtype=mlx.int32
             )
 
         # tgt_in: BOS + tgt_out[:, :-1]
-        tgt_in = mx.full((B, tgt_max), self.pad_idx, dtype=mx.int32)
+        tgt_in = mlx.full((B, tgt_max), self.pad_idx, dtype=mlx.int32)
         tgt_in[:, 0] = self.bos_idx
         tgt_in[:, 1:tgt_max] = tgt_out[:, : tgt_max - 1]
 
@@ -484,7 +484,7 @@ class ArithmeticData:
 
 
 def run_epoch(
-    data_iter: Iterator[tuple[mx.array, mx.array, mx.array]],
+    data_iter: Iterator[tuple[mlx.array, mlx.array, mlx.array]],
     model: nn.Module,
     loss_fn: Callable,
     opt: NoamOpt | None = None,
@@ -501,7 +501,7 @@ def run_epoch(
     per-token average, not per-sequence average.
 
     MLX difference — value_and_grad instead of loss.backward():
-      Gradient computation is functional: mx.value_and_grad(model, loss_fn)
+      Gradient computation is functional: mlx.value_and_grad(model, loss_fn)
       returns both the loss value and gradients w.r.t. model parameters.
       No zero_grad() needed — each call computes fresh gradients.
     """
@@ -516,7 +516,7 @@ def run_epoch(
     for src, tgt_in, tgt_out in tqdm(data_iter, desc=desc):
         if opt is not None:
             # Create a closure that takes model + data and returns scalar loss
-            # MLX: mx.value_and_grad(model, fn) computes gradients of fn w.r.t.
+            # MLX: mlx.value_and_grad(model, fn) computes gradients of fn w.r.t.
             # model parameters. The fn must take (model, *args) and return scalar.
             def loss_closure(m: nn.Module, s, ti, to):
                 src_mask = (s != pad_idx)[:, None, None, :]
@@ -524,17 +524,17 @@ def run_epoch(
                 logits = m(s, ti, src_mask, tgt_mask)
                 return loss_fn(logits, to)
 
-            # MLX: mx.value_and_grad(fun) takes the loss function (not model+fn).
+            # MLX: mlx.value_and_grad(fun) takes the loss function (not model+fn).
             # By default it differentiates w.r.t. the first argument (model).
-            loss_and_grad = mx.value_and_grad(loss_closure)
+            loss_and_grad = mlx.value_and_grad(loss_closure)
             loss, grads = loss_and_grad(model, src, tgt_in, tgt_out)
             opt.step(model, grads)
-            # CRITICAL MLX difference — mx.eval() forces computation:
-            #   MLX builds a lazy computation graph. Without mx.eval(), the graph
+            # CRITICAL MLX difference — mlx.eval() forces computation:
+            #   MLX builds a lazy computation graph. Without mlx.eval(), the graph
             #   grows unboundedly with each iteration, consuming memory. Calling
-            #   mx.eval() on parameters and optimizer state flushes the graph.
+            #   mlx.eval() on parameters and optimizer state flushes the graph.
             #   In training, eval once per step is the standard pattern.
-            mx.eval(model.parameters(), opt.optimizer.state)
+            mlx.eval(model.parameters(), opt.optimizer.state)
         else:
             src_mask = (src != pad_idx)[:, None, None, :]
             tgt_mask = make_std_mask(tgt_in, pad_idx)
@@ -551,7 +551,7 @@ def run_epoch(
 
 def run_epoch_steps(
     model: nn.Module,
-    data_fn: Callable[[int], tuple[mx.array, mx.array, mx.array]],
+    data_fn: Callable[[int], tuple[mlx.array, mlx.array, mlx.array]],
     loss_fn: Callable,
     opt: NoamOpt,
     n_steps: int,
@@ -571,7 +571,7 @@ def run_epoch_steps(
 
     MLX difference:
       - No device management (MLX handles device placement automatically on Apple Silicon)
-      - mx.eval() called after each optimizer step to flush the lazy graph
+      - mlx.eval() called after each optimizer step to flush the lazy graph
       - value_and_grad for gradient computation (functional, not imperative)
     """
     model.train()
@@ -589,13 +589,13 @@ def run_epoch_steps(
             logits = m(s, ti, src_mask, tgt_mask)
             return loss_fn(logits, to)
 
-        loss_and_grad = mx.value_and_grad(loss_closure)
+        loss_and_grad = mlx.value_and_grad(loss_closure)
         loss, grads = loss_and_grad(model, src, tgt_in, tgt_out)
         opt.step(model, grads)
         # Flush the lazy computation graph — prevents unbounded memory growth.
-        # MLX lazily records operations; mx.eval() forces execution and frees
+        # MLX lazily records operations; mlx.eval() forces execution and frees
         # the graph. This is the single most important MLX pattern to remember.
-        mx.eval(model.parameters(), opt.optimizer.state)
+        mlx.eval(model.parameters(), opt.optimizer.state)
 
         n_tok = int((tgt_out != pad_idx).sum().item())
         total_loss += float(loss.item()) * n_tok
