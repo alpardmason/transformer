@@ -5,6 +5,7 @@
 .claude
 notes/
 temp/
+*__pycache__/
 
 notes
 *.egg-info/

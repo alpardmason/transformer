@@ -121,15 +121,19 @@ class LabelSmoothing:
     This prevents the model from becoming overconfident (putting probability 1
     on a single token), which improves generalization and BLEU scores.
 
-    MLX difference — not an nn.Module:
-      In PyTorch, LabelSmoothing subclasses nn.Module to integrate with the
-      training loop. In MLX, we make it a plain callable since there are no
-      learnable parameters. It's functionally equivalent.
+    Loss — cross-entropy with soft targets (equivalent to KL when q is fixed):
+      The paper describes label smoothing via KL divergence:
+        KL(q || p) = sum_k q(k) * (log q(k) - log p(k))
+      PyTorch implements this with F.kl_div. MLX has no built-in kl_div, but
+      because q does not depend on model parameters, sum_k q(k) log q(k) is a
+      constant. Minimizing KL is therefore the same as minimizing:
+        -sum_k q(k) * log p(k)
+      i.e. cross-entropy with the smoothed distribution q as the target.
 
-      MLX uses:
-        mx.put_along_axis(arr, indices, values, axis)  instead of  scatter_
-        mx.where(cond, a, b)                            instead of  masked_fill
-      Both return new arrays (MLX is functional; no in-place ops).
+    MLX differences:
+      - Plain callable, not nn.Module (no learnable parameters).
+      - mx.where(cond, a, b) replaces masked_fill (functional; no in-place ops).
+      - No mx.log_softmax — compute mx.log(mx.softmax(...)) manually.
 
     Shapes:
       x:      (B, S, V)  — raw logits from the model
@@ -163,21 +167,20 @@ class LabelSmoothing:
         # MLX: mx.where replaces masked_fill
         true_dist = mx.where(mask[..., None], mx.zeros_like(true_dist), true_dist)
 
-        # KL divergence: q * (log q - log p), summed over vocab for each position
+        # Cross-entropy with soft targets: -sum_k q(k) * log p(k)
+        # Equivalent to KL(q || p) for optimization because q is fixed — the
+        # term sum_k q(k) log q(k) has zero gradient w.r.t. model parameters.
         # MLX: no mx.log_softmax — compute log after softmax manually
-        log_preds = mx.log(mx.softmax(x, axis=-1))  # log p(k)
-        # For numerical stability, log of the smoothed target (clamp to avoid log(0))
-        log_true = mx.log(mx.clip(true_dist, a_min=1e-10, a_max=1.0))
-        kl = true_dist * (log_true - log_preds)  # (B, S, V)
-        kl = kl.sum(axis=-1)                      # (B, S) — KL per position
+        log_preds = mx.log(mx.softmax(x, axis=-1))       # (B, S, V) — log p(k)
+        ce = -(true_dist * log_preds).sum(axis=-1)       # (B, S) — loss per position
 
         # Mask out padding positions (contribute zero to total)
-        kl = mx.where(mask, mx.zeros_like(kl), kl)
+        ce = mx.where(mask, mx.zeros_like(ce), ce)
 
         # Average over non-padding tokens (not positions: a long sequence
         # contributes more to the loss than a short one).
         n_tokens = mx.maximum((~mask).astype(mx.int32).sum(), 1)
-        return kl.sum() / n_tokens
+        return ce.sum() / n_tokens
 
 
 # ──────────────────────────────────────────────────────────────────────
