@@ -16,17 +16,13 @@ MLX vs PyTorch — key differences annotated throughout:
   - mx.argmax(axis=...) replaces .argmax(dim=...).
 """
 
-import math
 import time
 from collections.abc import Callable, Iterator
-from typing import Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-
 from tqdm import tqdm
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Noam Learning Rate Scheduler (Section 5.3)
@@ -164,15 +160,17 @@ class LabelSmoothing:
         log_preds = mx.log(mx.softmax(x, axis=-1))  # (B, S, V)
 
         # -(1-ε) * log p(correct) — gather the target class log-prob only
-        nll = -mx.take_along_axis(
+        neg_log_correct = -mx.take_along_axis(
             log_preds, target[..., None], axis=-1
         ).squeeze(-1)  # (B, S)
 
         # -(ε/V) * sum_k log p(k) — uniform smoothing mass over all classes
-        uniform_term = -log_preds.sum(axis=-1)  # (B, S)
+        neg_log_sum = -log_preds.sum(axis=-1)  # (B, S)
 
-        eps_over_v = self.smoothing / vocab_size  # ε/V
-        loss = (1.0 - self.smoothing) * nll + eps_over_v * uniform_term  # (B, S)
+        uniform = self.smoothing / vocab_size  # ε/V
+        loss = (
+            1.0 - self.smoothing
+        ) * neg_log_correct + uniform * neg_log_sum  # (B, S)
 
         # Mask out padding positions (contribute zero to total)
         mask = target != self.ignore_index  # (B, S)
@@ -208,9 +206,7 @@ def subsequent_mask(size: int) -> mx.array:
     return mask == 0  # Lower triangular positions = True (can attend)
 
 
-def make_std_mask(
-    tgt: mx.array, pad: int = 0
-) -> mx.array:
+def make_std_mask(tgt: mx.array, pad: int = 0) -> mx.array:
     """Create a combined padding + subsequent mask for decoder self-attention.
 
     Combines two masks via logical AND:
@@ -222,8 +218,10 @@ def make_std_mask(
     Returns: (B, 1, S_tgt, S_tgt) boolean mask, True = can attend.
     """
     tgt_mask = (tgt != pad)[:, None, None, :]  # (B, 1, 1, S_tgt)
-    seq_mask = subsequent_mask(tgt.shape[-1]).astype(tgt_mask.dtype)  # (1, S_tgt, S_tgt)
-    return tgt_mask & seq_mask                                          # (B, 1, S_tgt, S_tgt)
+    seq_mask = subsequent_mask(tgt.shape[-1]).astype(
+        tgt_mask.dtype
+    )  # (1, S_tgt, S_tgt)
+    return tgt_mask & seq_mask  # (B, 1, S_tgt, S_tgt)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -312,8 +310,10 @@ class SyntheticData:
             [mx.full((batch_size, 1), self.pad_idx, dtype=mx.int32), content], axis=1
         )
         tgt_input = mx.put_along_axis(
-            tgt_input, mx.zeros((batch_size, 1), dtype=mx.int32),
-            mx.full((batch_size, 1), self.bos_idx, dtype=mx.int32), axis=1
+            tgt_input,
+            mx.zeros((batch_size, 1), dtype=mx.int32),
+            mx.full((batch_size, 1), self.bos_idx, dtype=mx.int32),
+            axis=1,
         )
 
         # ── Target output: content + EOS (same as source) ──────────────
@@ -401,6 +401,7 @@ class ArithmeticData:
                 b = max(b, 1)  # ensure b >= 1
                 max_k = max_op // b
                 import random
+
                 k = random.randint(0, max_k)
                 a_vals[i] = b * k
                 b_vals[i] = b
@@ -427,7 +428,9 @@ class ArithmeticData:
             b_digits = self._to_digits(b_vals[i])
             ans_digits = self._to_digits(answers[i])
 
-            src_tokens = a_digits + [self.OPS[op_indices_eager[i]]] + b_digits + [self.eos_idx]
+            src_tokens = (
+                a_digits + [self.OPS[op_indices_eager[i]]] + b_digits + [self.eos_idx]
+            )
             tgt_tokens = [self.EQ] + ans_digits + [self.eos_idx]
 
             src_list.append(src_tokens)
@@ -440,13 +443,15 @@ class ArithmeticData:
         tgt_out = mx.full((B, tgt_max), self.pad_idx, dtype=mx.int32)
 
         for i in range(B):
-            src[i, :len(src_list[i])] = mx.array(src_list[i], dtype=mx.int32)
-            tgt_out[i, :len(tgt_out_list[i])] = mx.array(tgt_out_list[i], dtype=mx.int32)
+            src[i, : len(src_list[i])] = mx.array(src_list[i], dtype=mx.int32)
+            tgt_out[i, : len(tgt_out_list[i])] = mx.array(
+                tgt_out_list[i], dtype=mx.int32
+            )
 
         # tgt_in: BOS + tgt_out[:, :-1]
         tgt_in = mx.full((B, tgt_max), self.pad_idx, dtype=mx.int32)
         tgt_in[:, 0] = self.bos_idx
-        tgt_in[:, 1:tgt_max] = tgt_out[:, :tgt_max - 1]
+        tgt_in[:, 1:tgt_max] = tgt_out[:, : tgt_max - 1]
 
         return src, tgt_in, tgt_out
 
@@ -459,18 +464,18 @@ class ArithmeticData:
             if 3 <= t <= 12:
                 chars.append(str(t - 3))
             elif t == 13:
-                chars.append('+')
+                chars.append("+")
             elif t == 14:
-                chars.append('-')
+                chars.append("-")
             elif t == 15:
-                chars.append('*')
+                chars.append("*")
             elif t == 16:
-                chars.append('/')
+                chars.append("/")
             elif t == 17:
-                chars.append('=')
+                chars.append("=")
             else:
-                chars.append('?')
-        return ''.join(chars) if chars else '<empty>'
+                chars.append("?")
+        return "".join(chars) if chars else "<empty>"
 
 
 # ──────────────────────────────────────────────────────────────────────
